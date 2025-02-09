@@ -1,7 +1,17 @@
-from gmail_api import label, query
+import logging
+import os
+
 from gmail_api.api import Gmail
 
-# import to setup logging
-from gmail_api.logging import logger  # type: ignore # noqa
+LOG_LEVEL = os.getenv("GMAIL_API_LOG_LEVEL", "INFO")
+LOG_FMT = "{asctime} - {module}.{funcName}:{lineno} - {levelname} - {message}"
+DATE_FMT = "%Y-%m-%d %H:%M:%S%z"
 
-__all__ = ["Gmail", "label", "query"]
+logger = logging.getLogger("simplegmail")
+logger.setLevel(LOG_LEVEL)
+handler = logging.StreamHandler()
+handler.setFormatter(logging.Formatter(fmt=LOG_FMT, datefmt=DATE_FMT, style="{"))
+logger.addHandler(handler)
+
+
+__all__ = ["Gmail"]
