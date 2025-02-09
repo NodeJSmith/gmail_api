@@ -1,4 +1,5 @@
 import atexit
+import base64
 import typing
 from collections.abc import Generator
 from concurrent.futures import ThreadPoolExecutor
@@ -14,6 +15,8 @@ from yarl import URL
 from gmail_api.email_msg import EmailMsg
 
 if typing.TYPE_CHECKING:
+    from email.message import Message
+
     import googleapiclient.http  # type: ignore
     from oauth2client.client import OAuth2Credentials
 
@@ -28,11 +31,12 @@ JSON_HEADERS = {
 }
 
 HOST = "gmail.googleapis.com"
-BASE_URL = f"{HOST}/gmail/v1/users/{{user_id}}"
 
-THREAD_BASE_URL = f"{BASE_URL}/threads"
-DRAFT_BASE_URL = f"{BASE_URL}/drafts"
-LABEL_BASE_URL = f"{BASE_URL}/labels"
+BASE_URL = URL(f"https://{HOST}/gmail/v1/users/me")
+
+# THREAD_BASE_URL = f"{BASE_URL}/threads"
+# DRAFT_BASE_URL = f"{BASE_URL}/drafts"
+# LABEL_BASE_URL = f"{BASE_URL}/labels"
 
 
 ## Drafts
@@ -104,16 +108,13 @@ class EndpointApi:
     session: httpx.Client
     user_id: str = "me"
     credentials: "OAuth2Credentials"
-    default_path_template: str
+    endpoint: str
 
-    def __init__(self, credentials: "OAuth2Credentials") -> None:
+    def __init__(self, credentials: "OAuth2Credentials", session: httpx.Client) -> None:
         self.credentials = credentials
-        self.session = httpx.Client(
-            headers=JSON_HEADERS, timeout=httpx.Timeout(20.0, connect=60.0), auth=HttpxGmailAuth(credentials)
-        )
-        atexit.register(self.session.close)
+        self.session = session
 
-    def _msg_request(
+    def _request(
         self,
         method: str,
         url: str,
@@ -128,9 +129,7 @@ class EndpointApi:
         params = {k: v for k, v in params.items() if v is not None}
         url = url.lstrip("/")
 
-        path = self.default_path_template.format(user_id=self.user_id, path=url)
-
-        full_url = str(URL.build(scheme="https", host=HOST, path=path))
+        full_url = str(BASE_URL / self.endpoint / url)
 
         LOGGER.debug(f"Making {method!r} request to {full_url}, params: {params}")
 
@@ -161,13 +160,13 @@ class EndpointApi:
 
 
 class Messages(EndpointApi):
-    default_path_template: str = "/gmail/v1/users/{user_id}/messages/{path}"
+    endpoint: str = "messages"
 
     def batch_delete(self, message_ids: list[str] | list[EmailMsg]) -> "googleapiclient.http.HttpRequest":
         message_ids = [m.id if isinstance(m, EmailMsg) else m for m in message_ids]
 
         body = {"ids": message_ids}
-        return self._msg_request("POST", "batchDelete", json=body)
+        return self._request("POST", "batchDelete", json=body)
 
     def batch_modify(
         self,
@@ -178,14 +177,14 @@ class Messages(EndpointApi):
         message_ids = [m.id if isinstance(m, EmailMsg) else m for m in message_ids]
 
         body = {"ids": message_ids, "addLabelIds": add_labels, "removeLabelIds": remove_labels}
-        return self._msg_request("POST", "batchModify", json=body)
+        return self._request("POST", "batchModify", json=body)
 
     def delete(self, message_id: str | EmailMsg) -> "googleapiclient.http.HttpRequest":
         message_id = message_id.id if isinstance(message_id, EmailMsg) else message_id
-        return self._msg_request("DELETE", f"{message_id}")
+        return self._request("DELETE", f"{message_id}")
 
     def get(self, message_id: str) -> "EmailMsg":
-        raw_message = self._msg_request("GET", message_id, params={"alt": "json", "format": "raw"})
+        raw_message = self._request("GET", message_id, params={"alt": "json", "format": "raw"})
         return EmailMsg(raw_message)
 
     def list_(
@@ -208,12 +207,12 @@ class Messages(EndpointApi):
         params = {k: v for k, v in params.items() if v is not None}
 
         all_messages = []
-        resp = self._msg_request("GET", "", params=params, **kwargs)
+        resp = self._request("GET", "", params=params, **kwargs)
         all_messages.extend(resp.get("messages", []))
 
         while "nextPageToken" in resp:
             params["pageToken"] = resp["nextPageToken"]
-            resp = self._msg_request("GET", "", params=params, **kwargs)
+            resp = self._request("GET", "", params=params, **kwargs)
             all_messages.extend(resp["messages"])
 
         with ThreadPoolExecutor() as pool:
@@ -224,45 +223,57 @@ class Messages(EndpointApi):
     def modify(self, message_id: str | EmailMsg, add_labels: list[str], remove_labels: list[str]) -> "EmailMsg":
         message_id = message_id.id if isinstance(message_id, EmailMsg) else message_id
         body = {"addLabelIds": add_labels, "removeLabelIds": remove_labels}
-        self._msg_request("POST", f"{message_id}/modify", json=body)
+        self._request("POST", f"{message_id}/modify", json=body)
         return self.get(message_id)
 
-    # def send(self, *, body: "Message", **kwargs: typing.Any) -> "MessageHttpRequest":
-    #     return self._msg_request("POST", "send", json=body, **kwargs)
+    def send(self, email: "Message", **kwargs: typing.Any):
+        body = {"raw": base64.urlsafe_b64encode(email.as_bytes()).decode("utf-8")}
+        return self._request("POST", "send", json=body, **kwargs)
 
     def trash(self, message_id: str | EmailMsg) -> "EmailMsg":
         message_id = message_id.id if isinstance(message_id, EmailMsg) else message_id
-        self._msg_request("POST", f"{message_id}/trash")
+        self._request("POST", f"{message_id}/trash")
         return self.get(message_id)
 
     def untrash(self, message_id: str | EmailMsg) -> "EmailMsg":
         message_id = message_id.id if isinstance(message_id, EmailMsg) else message_id
-        self._msg_request("POST", f"{message_id}/untrash")
+        self._request("POST", f"{message_id}/untrash")
         return self.get(message_id)
 
 
-class Drafts:
+class Drafts(EndpointApi):
     pass
 
 
-class Labels:
+class Labels(EndpointApi):
     pass
 
 
-class Threads:
+class Threads(EndpointApi):
     pass
 
 
-class Users:
+class Users(EndpointApi):
     pass
 
 
 class Gmail:
     messages: Messages
+    drafts: Drafts
+    labels: Labels
+    threads: Threads
+    users: Users
 
     def __init__(self, credentials: "OAuth2Credentials") -> None:
         self.credentials = credentials
-        self.session = httpx.Client(headers=JSON_HEADERS, timeout=httpx.Timeout(20.0, connect=60.0))
+        self.session = httpx.Client(
+            headers=JSON_HEADERS, timeout=httpx.Timeout(20.0, connect=60.0), auth=HttpxGmailAuth(credentials)
+        )
+
         atexit.register(self.session.close)
 
-        self.messages = Messages(credentials=credentials)
+        self.messages = Messages(credentials=credentials, session=self.session)
+        self.drafts = Drafts(credentials=credentials, session=self.session)
+        self.labels = Labels(credentials=credentials, session=self.session)
+        self.threads = Threads(credentials=credentials, session=self.session)
+        self.users = Users(credentials=credentials, session=self.session)
