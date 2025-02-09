@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "gmail_api"
+version = "0.0.1"
+description = "A simple Python API client for Gmail."
+readme = "README.md"
+license = { text = "MIT" }
+authors = [
+    { name = "Jessica Smith", email = "12jessicasmith34@gmail.com" }, # Update with actual author details
+]
+requires-python = ">=3.11"
+dependencies = [
+    "google-auth-oauthlib>=1.2.0,<1.3.0",
+    "google-auth-httplib2>=0.2.0,<0.3.0",
+    "httpx>=0.28.0,<0.29.0",
+    "yarl>=1.18.0,<1.19.0",
+    "pendulum>=3.0.0,<3.1.0",
+    "oauth2client>=4.1.0,<4.2.0",
+    "mail-parser>=4.1.0,<4.2.0",
+    "attrs>=25.1.0,<25.2.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/nodejsmith/gmail_api"
