@@ -1,14 +1,19 @@
 import atexit
 import base64
+import json
 import typing
 from collections.abc import Generator
 from concurrent.futures import ThreadPoolExecutor
 from json import JSONDecodeError
 from logging import getLogger
+from os import PathLike
+from pathlib import Path
 from typing import Any
 
 import httpx
-from httplib2 import Http
+from google.auth.transport.requests import Request as GoogleRequest
+from google.oauth2.credentials import Credentials
+from google_auth_oauthlib.flow import InstalledAppFlow
 from httpx import Request
 from yarl import URL
 
@@ -18,10 +23,15 @@ if typing.TYPE_CHECKING:
     from email.message import Message
 
     import googleapiclient.http  # type: ignore
-    from oauth2client.client import OAuth2Credentials
 
 
 LOGGER = getLogger(__name__)
+SCOPES = [
+    "https://www.googleapis.com/auth/gmail.modify",
+    "https://www.googleapis.com/auth/gmail.settings.basic",
+]
+DEFAULT_CREDS_FILE_PATH = Path("credentials.json")
+DEFAULT_TOKEN_FILE_PATH = Path("token.json")
 
 JSON_HEADERS = {
     "Content-Type": "application/json",
@@ -86,32 +96,31 @@ DELETE_THREAD_URL = "/{thread_id}"
 
 
 class HttpxGmailAuth(httpx.Auth):
-    def __init__(self, credentials: "OAuth2Credentials") -> None:
-        """HTTPX Authentication extension for OAuth2Credentials.
+    def __init__(self, credentials: Credentials) -> None:
+        """HTTPX Authentication extension for Credentials.
 
         Args:
-            credentials (OAuth2Credentials): OAuth2Credentials object.
+            credentials (Credentials): Credentials object.
         """
 
         self.credentials = credentials
 
     def auth_flow(self, request: Request) -> Generator[Request, Any, None]:
-        if self.credentials.access_token_expired:
-            self.credentials.refresh(Http())
+        assert isinstance(self.credentials, Credentials)
 
-        request.headers["Authorization"] = f"Bearer {self.credentials.access_token}"
+        if self.credentials.expired:
+            self.credentials.refresh(GoogleRequest())
 
+        request.headers["Authorization"] = f"Bearer {self.credentials.token}"
         yield request
 
 
 class EndpointApi:
     session: httpx.Client
     user_id: str = "me"
-    credentials: "OAuth2Credentials"
     endpoint: str
 
-    def __init__(self, credentials: "OAuth2Credentials", session: httpx.Client) -> None:
-        self.credentials = credentials
+    def __init__(self, session: httpx.Client) -> None:
         self.session = session
 
     def _request(
@@ -127,9 +136,11 @@ class EndpointApi:
         headers = headers or {}
         params = params or {}
         params = {k: v for k, v in params.items() if v is not None}
+
+        endpoint = self.endpoint.strip("/")
         url = url.lstrip("/")
 
-        full_url = str(BASE_URL / self.endpoint / url)
+        full_url = str(BASE_URL / endpoint / url)
 
         LOGGER.debug(f"Making {method!r} request to {full_url}, params: {params}")
 
@@ -242,19 +253,67 @@ class Messages(EndpointApi):
 
 
 class Drafts(EndpointApi):
-    pass
+    endpoint: str = "drafts"
+
+    def list_(self, max_results: int = 500, page_token: str | None = None, **kwargs: typing.Any):
+        params = {"maxResults": max_results, "pageToken": page_token}
+        return self._request("GET", "", params=params, **kwargs)
 
 
 class Labels(EndpointApi):
-    pass
+    endpoint: str = "labels"
+
+    def list_(self, max_results: int = 500, page_token: str | None = None, **kwargs: typing.Any):
+        params = {"maxResults": max_results, "pageToken": page_token}
+        return self._request("GET", "", params=params, **kwargs)
 
 
 class Threads(EndpointApi):
-    pass
+    endpoint: str = "threads"
+
+    def get(self, thread_id: str) -> "EmailMsg":
+        raw_thread = self._request("GET", thread_id, params={"alt": "json", "format": "raw"})
+        return EmailMsg(raw_thread)
+
+    def list_(
+        self,
+        include_spam_trash: bool = False,
+        label_ids: str | list[str] | None = None,
+        max_results: int = 500,
+        page_token: str | None = None,
+        q: str | None = None,
+        **kwargs: typing.Any,
+    ) -> list[EmailMsg]:
+        params = {
+            "includeSpamTrash": include_spam_trash,
+            "labelIds": label_ids,
+            "maxResults": max_results,
+            "pageToken": page_token,
+            "q": q,
+        }
+
+        params = {k: v for k, v in params.items() if v is not None}
+
+        all_threads = []
+        resp = self._request("GET", "", params=params, **kwargs)
+        all_threads.extend(resp.get("threads", []))
+
+        while "nextPageToken" in resp:
+            params["pageToken"] = resp["nextPageToken"]
+            resp = self._request("GET", "", params=params, **kwargs)
+            all_threads.extend(resp["threads"])
+
+        with ThreadPoolExecutor() as pool:
+            parsed_threads = list(pool.map(self.get, (t["id"] for t in all_threads)))
+
+        return parsed_threads
 
 
 class Users(EndpointApi):
-    pass
+    endpoint: str = "users"
+
+    def get_profile(self) -> dict[str, Any]:
+        return self._request("GET", "me/profile")
 
 
 class Gmail:
@@ -264,7 +323,30 @@ class Gmail:
     threads: Threads
     users: Users
 
-    def __init__(self, credentials: "OAuth2Credentials") -> None:
+    @classmethod
+    def authentication_flow(
+        cls,
+        cred_file_path: PathLike[str] = DEFAULT_CREDS_FILE_PATH,
+        token_save_path: PathLike[str] = DEFAULT_TOKEN_FILE_PATH,
+        skip_writing: bool = False,
+    ) -> Credentials:
+        cred_file_path = Path(cred_file_path)
+        flow = InstalledAppFlow.from_client_secrets_file(cred_file_path, SCOPES)
+        creds = flow.run_local_server(port=0)
+
+        token_save_path = Path(token_save_path)
+        if not skip_writing:
+            token_save_path.write_text(creds.to_json())
+
+        return creds
+
+    @classmethod
+    def _from_token_file(cls, token_file_path: PathLike[str] = DEFAULT_TOKEN_FILE_PATH) -> "Gmail":
+        token_file_path = Path(token_file_path)
+        creds = Credentials(**json.loads(token_file_path.read_text()))
+        return cls(credentials=creds)
+
+    def __init__(self, credentials: Credentials) -> None:
         self.credentials = credentials
         self.session = httpx.Client(
             headers=JSON_HEADERS, timeout=httpx.Timeout(20.0, connect=60.0), auth=HttpxGmailAuth(credentials)
@@ -272,8 +354,8 @@ class Gmail:
 
         atexit.register(self.session.close)
 
-        self.messages = Messages(credentials=credentials, session=self.session)
-        self.drafts = Drafts(credentials=credentials, session=self.session)
-        self.labels = Labels(credentials=credentials, session=self.session)
-        self.threads = Threads(credentials=credentials, session=self.session)
-        self.users = Users(credentials=credentials, session=self.session)
+        self.messages = Messages(session=self.session)
+        self.drafts = Drafts(session=self.session)
+        self.labels = Labels(session=self.session)
+        self.threads = Threads(session=self.session)
+        self.users = Users(session=self.session)
