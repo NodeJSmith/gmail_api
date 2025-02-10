@@ -1,37 +1,4 @@
-import typing
-
 from mailparser.utils import sanitize
-from oauth2client.client import OAuth2Credentials
-
-if typing.TYPE_CHECKING:
-    from google.oauth2.credentials import Credentials
-
-
-def convert_install_app_flow_creds_to_oauth2creds(creds: "Credentials") -> OAuth2Credentials:
-    token_response = {
-        "access_token": creds.token,
-        "expires_in": 3599,
-        "refresh_token": creds.refresh_token,
-        "scope": " ".join(creds.scopes),
-        "token_type": "Bearer",
-    }
-
-    oauth2creds = OAuth2Credentials(
-        access_token=creds.token,
-        client_id=creds.client_id,
-        client_secret=creds.client_secret,
-        refresh_token=creds.refresh_token,
-        token_expiry=creds.expiry,
-        token_uri=creds.token_uri,
-        id_token=None,
-        scopes=creds.scopes,
-        user_agent=None,
-        revoke_uri="https://oauth2.googleapis.com/revoke",
-        id_token_jwt=None,
-        token_response=token_response,
-        token_info_uri="https://oauth2.googleapis.com/tokeninfo",
-    )
-    return oauth2creds
 
 
 # replaces ported_string from mailparser.utils
